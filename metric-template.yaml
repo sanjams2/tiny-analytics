@@ -1,0 +1,219 @@
+---
+
+Parameters:
+
+  EndpointPrefix:
+    Type: String
+    Description: "name of bucket to use as a metric endpoint"
+
+  MetricNamespace:
+    Type: String
+    Description: "the namespace to emit metrics to"
+
+  LambdaLogExpirationDays:
+    Type: Number
+    Description: "Length of time in days to keep log processing lambda logs"
+    Default: "90"
+
+  S3LogExpirationDays:
+    Type: Number
+    Description: "Length of time in days to keep s3 metric logs"
+    Default: "90"
+
+Resources:
+
+  LogProcessingLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LogProcessingLambdaLogGroup
+    Properties:
+      Code:
+        ZipFile: 
+          !Sub |
+            import boto3
+            import csv
+            import json
+            import time
+            from io import StringIO
+            from urllib.parse import urlparse
+            from urllib.parse import parse_qs
+
+            ACCESS_LOG_COLUMN_NAMES = [
+              "Bucket Owner",
+              "Bucket",
+              "Time",
+              "Time Offset",
+              "Remote IP",
+              "Requester",
+              "Request ID",
+              "Operation",
+              "Key",
+              "Request-URI",
+              "HTTP status",
+              "Error Code",
+              "Bytes Sent",
+              "Object Size",
+              "Total Time",
+              "Turn-Around Time",
+              "Referer",
+              "User-Agent",
+              "Version Id",
+              "Host Id",
+              "Signature Version",
+              "Cipher Suite",
+              "Authentication Type",
+              "Host Header",
+              "TLS version",
+              "Access Point ARN",
+            ]
+            EXPECTED_REQ_URI_PREFIX = "HEAD /metrics/v1/"
+            EXPECTED_REQ_URI_SUFFIX = " HTTP/"
+
+            s3 = boto3.client("s3")
+
+            def emit_metric(metric_log):
+              path = metric_log['Request-URI'].replace(EXPECTED_REQ_URI_PREFIX, "").split(EXPECTED_REQ_URI_SUFFIX)[0]
+              url = urlparse(path)
+              metric_name = url.path.split("/")[0]
+              params = {k: v for k, v in parse_qs(url.query).items()}
+              emf_line = {
+                "_aws": {
+                  "Timestamp": int(time.time() * 1000),
+                  "CloudWatchMetrics": [
+                    {
+                      "Namespace": "${MetricNamespace}",
+                      "Dimensions": [[]],
+                      "Metrics": [
+                        {
+                          "Name": metric_name,
+                        }
+                      ]
+                    }
+                  ]
+                },
+                metric_name: 1,
+                "UserAgent": metric_log['User-Agent'],
+                "RequestURI": metric_log['Request-URI'],
+              }
+              for k, v in params.items():
+                if len(v) == 1:
+                  v = v[0]
+                emf_line[k] = v
+              print(json.dumps(emf_line))
+
+            def handler(event, context):
+                if len(event.get("Records", [])) != 1:
+                  print("Unexpected event format. Skipping")
+                  print(event)
+                  return {}
+                event = event["Records"][0]
+                bucket = event.get('s3', {}).get('bucket', {}).get('name')
+                key = event.get('s3', {}).get('object', {}).get('key')
+                if not bucket or not key:
+                  print("Unexpected event format. Skipping")
+                  print(event)
+                  return {}
+                resp = s3.get_object(Key=key, Bucket=bucket)
+                for line in resp['Body'].iter_lines(chunk_size=1024, keepends=False):
+                  content = line.decode()
+                  for item in csv.DictReader(StringIO(content), fieldnames=ACCESS_LOG_COLUMN_NAMES, delimiter=" "):
+                    if item['Operation'] == 'REST.HEAD.OBJECT' and item['Request-URI'].startswith(EXPECTED_REQ_URI_PREFIX):
+                      emit_metric(item)
+                return {}
+      Handler: index.handler
+      Architectures:
+      - arm64
+      Role: !GetAtt LogProcessingLambdaRole.Arn
+      FunctionName: !Sub "${AWS::StackName}-LogProcessingLambda"
+      Runtime: python3.9
+      Timeout: 5
+
+  LogProcessingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LogProcessingLambdaRole"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: "s3access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:GetObject
+              - s3:ListBucket
+              Resource:
+              - !Sub 'arn:aws:s3:::${EndpointPrefix}-logging/*'
+              - !Sub 'arn:aws:s3:::${EndpointPrefix}-logging'
+
+  LogProcessingLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-LogProcessingLambda"
+      RetentionInDays: !Ref LambdaLogExpirationDays
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LogProcessingLambda.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      # cannot reference logging bucket directly or we will create a circular dependency
+      SourceArn: !Sub 'arn:aws:s3:::${EndpointPrefix}-logging'
+
+  MetricsEndpointBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref EndpointPrefix
+      LoggingConfiguration:
+        DestinationBucketName: !Ref MetricsEndpointLoggingBucket
+
+  MetricsEndpointLoggingBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LambdaInvokePermission
+    Properties:
+      BucketName: !Sub "${EndpointPrefix}-logging"
+      AccessControl: LogDeliveryWrite
+      LifecycleConfiguration:
+        Rules:
+          - Id: "ExpireOldObjects"
+            Status: Enabled
+            ExpirationInDays: !Ref S3LogExpirationDays
+      NotificationConfiguration:
+        LambdaConfigurations: 
+          - Event: "s3:ObjectCreated:*"
+            Function: !GetAtt LogProcessingLambda.Arn
+
+  MetricsEndpointLoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MetricsEndpointLoggingBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: "s3:*"
+            Effect: "Deny"
+            Principal: "*"
+            Resource:
+              - !Sub "arn:aws:s3:::${MetricsEndpointLoggingBucket}/*"
+              - !Sub "arn:aws:s3:::${MetricsEndpointLoggingBucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+Outputs:
+
+  MetricsEndpoint:
+    Description: "Endpoint to use for emitting metrics"
+    Value: !Sub "http://${MetricsEndpointBucket}.s3.${AWS::Region}.amazonaws.com/metrics/v1"
