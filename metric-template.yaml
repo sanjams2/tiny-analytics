@@ -32,7 +32,7 @@ Resources:
             import boto3
             import csv
             import json
-            import time
+            from datetime import datetime
             from io import StringIO
             from urllib.parse import urlparse
             from urllib.parse import parse_qs
@@ -70,14 +70,14 @@ Resources:
 
             s3 = boto3.client("s3")
 
-            def emit_metric(metric_log):
+            def emit_metric(metric_log, timestamp):
               path = metric_log['Request-URI'].replace(EXPECTED_REQ_URI_PREFIX, "").split(EXPECTED_REQ_URI_SUFFIX)[0]
               url = urlparse(path)
               metric_name = url.path.split("/")[0]
               params = {k: v for k, v in parse_qs(url.query).items()}
               emf_line = {
                 "_aws": {
-                  "Timestamp": int(time.time() * 1000),
+                  "Timestamp": int(timestamp.timestamp() * 1000),
                   "CloudWatchMetrics": [
                     {
                       "Namespace": "${MetricNamespace}",
@@ -117,7 +117,8 @@ Resources:
                   content = line.decode()
                   for item in csv.DictReader(StringIO(content), fieldnames=ACCESS_LOG_COLUMN_NAMES, delimiter=" "):
                     if item['Operation'] == 'REST.HEAD.OBJECT' and item['Request-URI'].startswith(EXPECTED_REQ_URI_PREFIX):
-                      emit_metric(item)
+                      timestamp = datetime.strptime(item['Time'] + ' ' + item['Time Offset'], "[%d/%b/%Y:%H:%M:%S %z]")
+                      emit_metric(item, timestamp)
                 return {}
       Handler: index.handler
       Architectures:
