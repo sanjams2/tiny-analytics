@@ -80,8 +80,6 @@ Here is an example curl command to emit a metric named `page2view` for `my-app-m
 curl -I http://my-app-metrics.s3.us-west-2.amazonaws.com/metrics/v1/page2view
 ```
 
-Note that this request will fail with a `403 Forbidden` error status, **but that is ok** — metrics are still being emitted.
-
 ### Advanced Usage
 
 You can also add dimensions to the logs emitted by the Lambda that emits metrics. To do this, add query parameter to the url you call. Example using curl:
@@ -124,11 +122,8 @@ to the EMF log lines.
 ```python
 import urllib.request
 
-req = urllib.request.Request("http://my-app-metrics.s3.us-west-2.amazonaws.com/metrics/v1/page2view?pageversion=1.0.2")
-try: 
-	urllib.request.urlopen(req)
-except Exception:
-	pass
+req = urllib.request.Request("http://my-app-metrics.s3.us-west-2.amazonaws.com/metrics/v1/page2view?pageversion=1.0.2", method="HEAD")
+urllib.request.urlopen(req)
 ```
 
 ### Go
