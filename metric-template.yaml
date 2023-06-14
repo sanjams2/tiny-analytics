@@ -179,13 +179,39 @@ Resources:
       BucketName: !Ref EndpointPrefix
       LoggingConfiguration:
         DestinationBucketName: !Ref MetricsEndpointLoggingBucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: false
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - HEAD
+            AllowedOrigins:
+              - '*'
+
+  MetricsEndpointBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MetricsEndpointBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: 
+              - "s3:ListBucket"
+            Resource:
+              - !GetAtt MetricsEndpointBucket.Arn
+            Effect: "Allow"
+            Principal: "*"
 
   MetricsEndpointLoggingBucket:
     Type: AWS::S3::Bucket
     DependsOn: LambdaInvokePermission
     Properties:
       BucketName: !Sub "${EndpointPrefix}-logging"
-      AccessControl: LogDeliveryWrite
       LifecycleConfiguration:
         Rules:
           - Id: "ExpireOldObjects"
